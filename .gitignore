@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+output/
+run_log.txt
+reddit_cookie.txt
+.env

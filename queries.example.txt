@@ -1,0 +1,5 @@
+# One query per line. Lines starting with # are ignored.
+# Each query is run through Google (via searchapi.io), results filtered down
+# to actual reddit.com/r/.../comments/... post URLs, and each matching post
+# (with full comment tree) is scraped and saved as a .txt file.
+site:reddit.com r/VideoEditing "critique my video"
