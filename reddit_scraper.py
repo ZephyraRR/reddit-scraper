@@ -9,27 +9,52 @@ Reddit Scraper
 
 Pokretanje:
     python reddit_scraper.py
+    python reddit_scraper.py --queries my_queries.txt --output my_output --max-pages 3
 
 Query-jevi se citaju iz queries.txt (jedan po liniji). Ako fajl ne postoji, pravi se
 automatski sa test query-jem.
 
 Kolacic za Reddit sesiju se cita iz reddit_cookie.txt (jedan red, ceo "Cookie" header
 iz pravog ulogovanog browsera). Taj fajl je osetljiv kao lozinka - ne deliti ga.
+
+SEARCHAPI_KEY moze doci iz environment varijable ili iz .env fajla u ovom direktorijumu
+(format: SEARCHAPI_KEY=tvoj_kljuc, jedna linija).
 """
 
-import json
+import argparse
 import os
 import re
 import sys
 import time
 import traceback
-import urllib.parse
 
 import requests
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(SCRIPT_DIR, ".env")
+
+
+def load_dotenv(path):
+    """Minimalni .env loader (bez eksterne zavisnosti) - puni os.environ ako kljuc jos nije setovan."""
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_dotenv(ENV_FILE)
 
 SEARCHAPI_KEY = os.environ.get("SEARCHAPI_KEY", "")
 SEARCHAPI_URL = "https://www.searchapi.io/api/v1/search"
@@ -39,7 +64,6 @@ MAX_MORE_ITERATIONS = 6       # koliko puta da "dopuni" load-more komentare
 REQUEST_DELAY = 5.0           # pauza izmedju reddit zahteva (sekunde)
 SEARCH_DELAY = 1.0            # pauza izmedju google search zahteva (sekunde)
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 QUERIES_FILE = os.path.join(SCRIPT_DIR, "queries.txt")
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
 COOKIE_FILE = os.path.join(SCRIPT_DIR, "reddit_cookie.txt")
@@ -58,27 +82,27 @@ REDDIT_HEADERS = {
 }
 
 
-def load_queries():
-    if not os.path.exists(QUERIES_FILE):
+def load_queries(queries_file):
+    if not os.path.exists(queries_file):
         default_query = 'site:reddit.com r/VideoEditing "critique my video"'
-        with open(QUERIES_FILE, "w", encoding="utf-8") as f:
+        with open(queries_file, "w", encoding="utf-8") as f:
             f.write(default_query + "\n")
-        print(f"Napravljen {QUERIES_FILE} sa test query-jem.")
+        print(f"Napravljen {queries_file} sa test query-jem.")
         return [default_query]
 
-    with open(QUERIES_FILE, "r", encoding="utf-8") as f:
+    with open(queries_file, "r", encoding="utf-8") as f:
         queries = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
     return queries
 
 
-def load_cookie():
-    if not os.path.exists(COOKIE_FILE):
-        print(f"[!] Nema {COOKIE_FILE}. Ubaci Reddit 'Cookie' header (iz ulogovanog browsera) u taj fajl.")
+def load_cookie(cookie_file):
+    if not os.path.exists(cookie_file):
+        print(f"[!] Nema {cookie_file}. Ubaci Reddit 'Cookie' header (iz ulogovanog browsera) u taj fajl.")
         sys.exit(1)
-    with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+    with open(cookie_file, "r", encoding="utf-8") as f:
         cookie = f.read().strip()
     if not cookie:
-        print(f"[!] {COOKIE_FILE} je prazan.")
+        print(f"[!] {cookie_file} je prazan.")
         sys.exit(1)
     return cookie
 
@@ -347,28 +371,40 @@ def save_post_file(post, out_dir, index):
     return filepath
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Skrejpuje pune Reddit threadove (post + komentari) preko Google pretrage.")
+    parser.add_argument("--queries", default=QUERIES_FILE, help="Putanja do queries.txt (podrazumevano: ./queries.txt)")
+    parser.add_argument("--output", default=OUTPUT_DIR, help="Izlazni direktorijum (podrazumevano: ./output)")
+    parser.add_argument("--cookie", default=COOKIE_FILE, help="Putanja do fajla sa Reddit cookie-jem (podrazumevano: ./reddit_cookie.txt)")
+    parser.add_argument("--max-pages", type=int, default=MAX_PAGES, help=f"Google stranica po query-ju (podrazumevano: {MAX_PAGES})")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     if not SEARCHAPI_KEY:
-        print("[!] Nedostaje SEARCHAPI_KEY environment varijabla.")
+        print("[!] Nedostaje SEARCHAPI_KEY. Setuj env varijablu ili je stavi u .env fajl (SEARCHAPI_KEY=...).")
         sys.exit(1)
 
-    queries = load_queries()
+    queries = load_queries(args.queries)
     if not queries:
-        print("Nema query-ja u queries.txt.")
+        print(f"Nema query-ja u {args.queries}.")
         sys.exit(1)
 
-    cookie = load_cookie()
+    cookie = load_cookie(args.cookie)
     session = requests.Session()
     session.headers.update(REDDIT_HEADERS)
     session.headers["Cookie"] = cookie
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(args.output, exist_ok=True)
 
-    for query in queries:
-        print(f"\n=== Query: {query} ===")
-        query_dir = os.path.join(OUTPUT_DIR, sanitize_filename(query, max_len=80))
+    total_saved = 0
+    for qi, query in enumerate(queries, start=1):
+        print(f"\n=== Query {qi}/{len(queries)}: {query} ===")
+        query_dir = os.path.join(args.output, sanitize_filename(query, max_len=80))
 
-        links = searchapi_google(query, MAX_PAGES)
+        links = searchapi_google(query, args.max_pages)
         post_urls = extract_reddit_post_urls(links)
         print(f"Pronadjeno {len(post_urls)} jedinstvenih Reddit objava.")
 
@@ -378,13 +414,14 @@ def main():
                 post = scrape_post(session, url)
                 if post:
                     filepath = save_post_file(post, query_dir, i)
+                    total_saved += 1
                     print(f"      Sacuvano: {filepath}")
             except Exception as e:
                 print(f"      [!] Neocekivana greska: {e}")
                 traceback.print_exc()
                 continue
 
-    print("\nGotovo.")
+    print(f"\nGotovo. {total_saved} objava sacuvano iz {len(queries)} query-ja u {args.output}/")
 
 
 if __name__ == "__main__":
